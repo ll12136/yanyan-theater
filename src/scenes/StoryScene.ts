@@ -69,6 +69,8 @@ export class StoryScene extends SharpScene {
   private breathFollowedThisPhase = false;
   /** 一轮跟着做的呼吸只出现一次：后面几幕的幕间回到原来那层安静的留白 */
   private breathGateDone = false;
+  /** 三轮做完了但玩家一次都没跟上：停在这里等他，不再替他把故事往下推 */
+  private breathWaiting = false;
   /** 左margin的夜里时间轴：22:30 → 01:30，走到哪一格看得见 */
   private timelineObjs: Phaser.GameObjects.GameObject[] = [];
   /** 右上角那团心事：每完成一幕、每给自己一次回应，它就小一点、暖一点 */
@@ -78,7 +80,6 @@ export class StoryScene extends SharpScene {
   private selfNoteDialog: HTMLDialogElement | null = null;
 
   private run = 0;
-  private interacted = false;
   private transitioning = false;
   private actionCount = 0;
   private sceneResponses = 0;
@@ -94,7 +95,6 @@ export class StoryScene extends SharpScene {
 
   create(): void {
     this.sceneIndex = 0;
-    this.interacted = false;
     this.transitioning = false;
     this.actionCount = 0;
     this.sceneResponses = 0;
@@ -226,16 +226,19 @@ export class StoryScene extends SharpScene {
     this.breathRound = 1;
     this.breathPhaseIn = true;
     this.breathFollowed = 0;
+    this.breathWaiting = false;
 
     this.inputMgr = new InputManager(this, (action) => this.onAction(action));
 
-    // 先用本地剧情保证可玩，再异步换成基于知乎原文的改编剧情
+    // 本地剧情先备好，但**不立刻开演**：先给改编一个上限内的机会。
+    // 原来的写法是「先演本地、改编回来再整套换掉」，于是玩家读到一半，
+    // 标题、正文、幕数（本地 5 幕 → 改编 3 幕）会被整个换掉——
+    // 那就是「我还没做选择，它自己就跳了」。现在改成开演前一次定稿。
     if (!store.engine.story) store.engine.selectTrouble('cantfall');
     this.title = store.engine.story?.title ?? '故事';
     this.sceneNodes = store.engine.story?.scenes ?? [];
     store.storyCredit = this.localCredit();
-    this.renderScene();
-    void this.loadAiStory();
+    void this.startStory();
   }
 
   update(time: number): void {
@@ -271,40 +274,75 @@ export class StoryScene extends SharpScene {
     this.creditText.setText(this.creditLine());
   }
 
-  /** 异步生成剧情：拿不到就保持玩家自己心事对应的本地剧情，绝不换成别的主题 */
-  private async loadAiStory(): Promise<void> {
-    if (!store.realTroubleText) return;
+  /**
+   * 开演前把剧情定下来。
+   *   1. 有这一局的缓存（上一局没来得及用的改编）→ 直接用，零等待；
+   *   2. 否则在 AI_STORY_WAIT_MS 之内等一次改编，等到了就用改编版；
+   *   3. 等不到就用本地剧情开演——**这一局绝不在阅读途中替换**。
+   *      超时之后改编如果真的回来了，存进 store.cachedAiStory 留给下一局，不打断这一局。
+   */
+  private async startStory(): Promise<void> {
     const run = this.run;
-    const localTitle = this.title;
-    const localNodes = this.sceneNodes;
-    if (store.realSampleText) {
+    const usable = (ai: unknown): boolean =>
+      Boolean(ai) && Array.isArray((ai as Record<string, unknown>).scenes) && ((ai as { scenes: unknown[] }).scenes.length > 0);
+    const applyAi = (ai: Record<string, unknown>): void => {
+      store.aiStory = ai;
+      this.title = typeof ai.title === 'string' && ai.title ? ai.title : this.title;
+      this.sceneNodes = (ai.scenes as Array<Record<string, unknown>>).map(convertAiScene);
+      this.sceneIndex = 0;
+      store.storyCredit = this.zhihuCredit(this.title);
+    };
+
+    const cached = store.cachedAiStory;
+    if (cached && cached.trouble === store.realTroubleText && usable(cached.story)) {
+      applyAi(cached.story);
+      this.renderScene();
+      return;
+    }
+
+    if (store.realTroubleText) {
       this.aiPending = true;
       this.refreshCredit();
-    }
-    const ai = await store.api.generateStory(store.realTroubleText, store.realSampleText ?? '');
-    if (run !== this.run) return;
-    // 玩家已经开始回应，就不在他读的时候换剧情
-    if (this.interacted) {
+      this.setWaitingForStory(true);
+      const request = store.api.generateStory(store.realTroubleText, store.realSampleText ?? '');
+      const ai = await Promise.race([
+        request,
+        new Promise<null>((resolve) => this.time.delayedCall(StoryScene.AI_STORY_WAIT_MS, () => resolve(null)))
+      ]);
+      if (run !== this.run) return;
       this.aiPending = false;
+      if (usable(ai)) {
+        applyAi(ai as Record<string, unknown>);
+      } else {
+        // 这一局不等了，但别浪费这一次的成果：回来就留给下一局
+        const trouble = store.realTroubleText;
+        void request.then((late) => {
+          if (usable(late)) store.cachedAiStory = { trouble, story: late as Record<string, unknown> };
+        });
+      }
+    }
+    this.setWaitingForStory(false);
+    this.renderScene();
+  }
+
+  /**
+   * 开演前的等待态。等待期间必须挡住输入——这时 sceneNodes 已经就位、inputLockUntil 还没设，
+   * 不挡的话玩家在「正在写故事」的界面上按一下就能把第一幕推走。
+   */
+  private setWaitingForStory(waiting: boolean): void {
+    if (!waiting) {
+      this.transitioning = false;
       this.refreshCredit();
       return;
     }
-    if (!ai || !Array.isArray(ai.scenes) || ai.scenes.length === 0) {
-      // 降级：继续用玩家这张心事卡自己的本地剧情（之前这里会跳去辞职主题，是错的）
-      this.aiPending = false;
-      this.title = localTitle;
-      this.sceneNodes = localNodes;
-      store.storyCredit = this.localCredit();
-      this.refreshCredit();
-      return;
-    }
-    store.aiStory = ai;
-    this.aiPending = false;
-    this.title = typeof ai.title === 'string' && ai.title ? ai.title : this.title;
-    this.sceneNodes = (ai.scenes as Array<Record<string, unknown>>).map(convertAiScene);
-    this.sceneIndex = 0;
-    store.storyCredit = this.zhihuCredit(this.title);
-    this.renderScene(true);
+    this.transitioning = true;
+    this.titleText.setText(this.title);
+    this.sceneText.setText('正在把你的心事写成今晚的故事…').setAlpha(1);
+    this.promptText.setText('');
+    this.optionAText.setText('');
+    this.optionBText.setText('');
+    this.actSourceText.setText('');
+    this.echoText.setText('');
   }
 
   /** 普通幕间：一层安静的留白（跟着做过的呼吸只有第一次） */
@@ -340,6 +378,11 @@ export class StoryScene extends SharpScene {
 
   private static readonly BREATH_ROUNDS = 3;
   private static readonly BREATH_PHASE_MS = 3200;
+  /**
+   * 开演前最多等改编多久。DeepSeek 实测 8~20 秒，给到 12 秒就够：
+   * 宁可这一局用本地剧情开演，也不要让玩家读到一半被整套换掉。
+   */
+  private static readonly AI_STORY_WAIT_MS = 12000;
 
   /**
    * 第一次换幕：把「先停一下」变成真的跟着做一次呼吸。
@@ -352,6 +395,7 @@ export class StoryScene extends SharpScene {
     this.breathRound = 1;
     this.breathPhaseIn = true;
     this.breathFollowed = 0;
+    this.breathWaiting = false;
     this.breathTitle.setText('跟着做一次呼吸');
     this.breathText.setText('吸的时候把气放长，呼的时候把肩膀放下来。');
     this.breathHintText.setText('左边抬起 / 右边抬起 / 挥砍 / 下压 都算跟上 · Enter 跳过');
@@ -384,6 +428,13 @@ export class StoryScene extends SharpScene {
       }
       this.breathRound += 1;
       if (this.breathRound > StoryScene.BREATH_ROUNDS) {
+        // 三轮做完了，但玩家一次都没跟上：**不再自己往下走**。
+        // 这里原来是直接 endBreath(true)，于是计数写着「你跟上了 0 次」，
+        // 19 秒后也会自己进第二幕——玩家什么都没做，故事就跳了。
+        if (this.breathFollowed === 0) {
+          this.waitForBreathFollow();
+          return;
+        }
         this.endBreath(true);
         return;
       }
@@ -392,7 +443,27 @@ export class StoryScene extends SharpScene {
     });
   }
 
+  /**
+   * 三轮呼吸走完、玩家却一次都没跟上：停在原地继续呼吸，等他自己动。
+   * 不做「等满 N 秒替他决定」——那正是玩家抱怨的「我没做选择，它自己跳到下一幕」。
+   * 出口有两个：跟上任意一次呼吸，或者按 Enter 跳过。
+   */
+  private waitForBreathFollow(): void {
+    this.breathWaiting = true;
+    this.breathRound = StoryScene.BREATH_ROUNDS;   // 计数别再涨，免得显示成第 4 轮
+    this.breathPhaseIn = true;
+    this.breathTitle.setText('慢慢来，不着急');
+    this.breathText.setText('跟上任意一个动作就行，不标准也算。');
+    this.breathHintText.setText('左边抬起 / 右边抬起 / 挥砍 / 下压 都算跟上 · Enter 跳过');
+    this.updateBreathCount();
+    this.tickBreath();                              // 呼吸继续，不停在这儿
+  }
+
   private updateBreathCount(): void {
+    if (this.breathWaiting) {
+      this.breathCountText.setText(`你跟上了 ${this.breathFollowed} 次 · 跟上任意一次就会继续`);
+      return;
+    }
     const round = Math.min(this.breathRound, StoryScene.BREATH_ROUNDS);
     this.breathCountText.setText(`第 ${round} / ${StoryScene.BREATH_ROUNDS} 轮 · 你跟上了 ${this.breathFollowed} 次`);
   }
@@ -409,6 +480,11 @@ export class StoryScene extends SharpScene {
     this.breathFollowed += 1;
     this.updateBreathCount();
     this.breathRing.setStrokeStyle(3.5, THEME.warm, 1);
+    // 正在等他动的时候，一跟上就继续往下走——这是玩家自己的动作触发的，不是替他决定
+    if (this.breathWaiting) {
+      this.endBreath(true);
+      return;
+    }
     this.time.delayedCall(240, () => {
       if (this.breathNext) this.breathRing.setStrokeStyle(2.5, this.breathPhaseIn ? THEME.green : THEME.warm, 0.85);
     });
@@ -422,6 +498,7 @@ export class StoryScene extends SharpScene {
     this.breathTimer = null;
     this.tweens.killTweensOf(this.breathRing);
     this.breathGateDone = true;
+    this.breathWaiting = false;
     this.breathPhaseText.setText('');
     this.breathCountText.setText('');
     this.breathHintText.setText('');
@@ -714,7 +791,6 @@ export class StoryScene extends SharpScene {
       return;
     }
     const choice = this.selectedSlot === 'A' ? node.optionA : node.optionB;
-    this.interacted = true;
     store.engine.applyChoice(choice.effect);
     // 选完了就把灯收掉：幕间那一层不该还留着上一幕的选中态
     this.selectedSlot = null;
@@ -758,7 +834,6 @@ export class StoryScene extends SharpScene {
     // 没有这两道门，玩家还没做选择，第二幕就会自己跳出来。
     if (action === 'selectA' || action === 'selectB') {
       if (this.time.now < this.inputLockUntil) return;
-      this.interacted = true;
       this.selectOption(action === 'selectA' ? 'A' : 'B');
       this.choiceHint.setText('这条路已经点亮了 · 按 Enter 或点下面的按钮，故事才往下走');
       this.choiceHint.setColor(css(THEME.faint));
@@ -770,7 +845,6 @@ export class StoryScene extends SharpScene {
       return;
     }
 
-    this.interacted = true;
     if (action === 'slash' || action === 'hug' || action === 'nod' || action === 'dodge' || action === 'investigate') {
       // 一幕之内给自己的回应有限度：超过之后只留话，不再加数值
       if (this.sceneResponses >= MAX_RESPONSES_PER_SCENE) {

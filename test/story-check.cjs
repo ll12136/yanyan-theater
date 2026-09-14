@@ -8,13 +8,23 @@ const assert=require('node:assert/strict');
 
 (async()=>{const b=await chromium.launch({executablePath:'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',headless:true});try{
 const p=await b.newPage({viewport:{width:1440,height:960}});const errors=[];p.on('pageerror',e=>errors.push(e.message));
+// 登录墙与剧情页无关：mock 成「未配置」，主按钮才直接开演。
+await p.route('**/api/auth/status**',r=>r.fulfill({status:200,contentType:'application/json',body:'{"configured":false,"loggedIn":false}'}));
 await p.goto('http://localhost:5174/?harvest=off');await p.waitForTimeout(900);
 await p.keyboard.press('Enter',{delay:100});await p.waitForTimeout(500);
-await p.keyboard.press('d',{delay:100});await p.waitForTimeout(300);       // 选「考研还是工作」
+await p.keyboard.press('d',{delay:100});await p.waitForTimeout(300);       // 选第 2 张心事卡
 await p.keyboard.press('j',{delay:100});await p.waitForTimeout(500);       // 放下心事
 await p.keyboard.press('j',{delay:100});                                   // 挥剑 → 取知乎内容
 await p.locator('.companions').waitFor({timeout:30000});                   // 过场动画结束后面板才出现
-await p.getByRole('button',{name:/走进故事/}).click();await p.waitForTimeout(1200);
+await p.getByRole('button',{name:/走进故事/}).click();
+// 开演前会先给改编一个上限（12 秒）的机会，等待期间正文位置显示「正在把你的心事写成今晚的故事…」。
+// 这里等它真正定稿开演——renderScene 跑过才会设 inputLockUntil，用它当信号。
+for(let i=0;i<60;i++){
+  const s=await p.evaluate(()=>{const s=window.__game.scene.getScene('StoryScene');return s?{trans:s.transitioning,lock:s.inputLockUntil,len:s.sceneText.text.length}:null;}).catch(()=>null);
+  if(s&&!s.trans&&s.lock>0&&s.len>0)break;
+  if(i===59)throw new Error('剧情页一直没开演');
+  await p.waitForTimeout(400);
+}
 
 // 场景内的文字与位置，用来检查布局与署名
 const read=()=>p.evaluate(async()=>{const {game}=await import(document.querySelector('script[src*="main.ts"]').src);
@@ -33,14 +43,16 @@ const creditBase=(st.credit||'').split('·  正在用知乎原文改编')[0].tri
 assert.equal(/原文里|原文提醒|原文的人/.test(creditBase),false,`署名里不该出现含糊的「原文」说法：${creditBase}`);
 assert.match(creditBase,/^(本地示例剧情 .*非知乎内容|改编自知乎 · @.+《.+》)/,`署名要么是知乎真实内容，要么如实标注本地示例：${creditBase}`);
 
-// 2. 模型可用时，剧情会换成基于知乎原文的改编，并换成真实署名（玩家还没动手，允许换）
-let ai=null;
-for(let i=0;i<45 && !ai;i++){await p.waitForTimeout(1000);const cur=await read();if(cur&&/^改编自知乎/.test((cur.credit||'').split('·  正在用知乎原文改编')[0].trim()))ai=cur;}
+// 2. 剧情在开演前就定稿：模型在等待上限（12 秒）内返回就用改编版，否则用本地剧情。
+//    这里不再「先演本地、模型回来再把整套换掉」——那正是玩家抱怨的
+//    「我还没做选择，它自己就跳到下一幕/换了剧情」。
+const creditNow=(st.credit||'').split('·  正在用知乎原文改编')[0].trim();
+const ai=/^改编自知乎/.test(creditNow)?st:null;
 if(ai){
   assert.match(ai.credit,/^改编自知乎 · @.+《.+》/,'改编剧情应署真实作者与标题');
-  console.log(`  改编剧情：《${ai.title}》 · ${ai.credit.replace(/\s+/g,' ')}`);
+  console.log(`  开演前已定稿为改编剧情：《${ai.title}》 · ${ai.credit.replace(/\s+/g,' ')}`);
 }else{
-  console.log(`  （模型这次没返回，保持在本地示例剧情，署名已如实标注：${creditBase}）`);
+  console.log(`  （模型这次没在开演前返回，用本地示例剧情开演，署名已如实标注：${creditNow}）`);
 }
 
 // 3. 正文逐字浮现 + 每幕一句真实来源
@@ -61,21 +73,28 @@ const echo=await read();
 const find=(s,re)=>s.items.find(i=>re.test(i.text));
 const echoItem=find(echo,/你躲避了/);
 assert.ok(echoItem,'动作之后应有回声文字');
-const optionA=find(echo,/【1 \/ ←】/);
-const optionB=find(echo,/【2 \/ →】/);
-assert.ok(optionA&&optionB,'选项卡片应标出 1/← 与 2/→ 键位');
+// 选项卡片角上标的是 ← / →（1 / 2 已故意解绑：体感「双手交叉额头」会连敲 1~4，
+// 绑上就会被不请自来的手势推走第一幕，见 actionMapper.ts 的注释）。
+const optionA=find(echo,/^←$/);
+const optionB=find(echo,/^→$/);
+assert.ok(optionA&&optionB,'两张卡片的角上应标出 ← 与 → 键位');
+const keyHint=find(echo,/【← \/ →】/);
+assert.ok(keyHint,'键位提示应写 ← / →，且不出现 1 / 2');
+assert.equal(Object.keys(echo).length>0&&/【1 \/ ←】|【2 \/ →】/.test(echo.items.map(i=>i.text).join('\n')),false,'不该再出现已经解绑的 1 / 2 键位');
 assert.ok(echoItem.bottom<=optionA.top,`回声(${echoItem.bottom}) 不得压到选项(${optionA.top})`);
-const actionHint=find(echo,/给此刻的自己一个回应/);
-const stats=find(echo,/给自己的回应/);
-const actionBtn=echo.items.filter(i=>/^(拥抱|听见|挥剑|歇一会)$/.test(i.text)).pop();
-assert.ok(actionHint&&stats&&actionBtn,'动作按钮、说明与状态条都应存在');
-assert.ok(actionBtn.bottom<=actionHint.top,`动作按钮(${actionBtn.bottom}) 不得压到说明(${actionHint.top})`);
+// 页面底部不再摆动作按钮（体感回应由硬件直接触发，见 StoryScene 的 responseButtons = []），
+// 所以这里只验「动作说明」与「状态条」都存在，且彼此不压字。
+const actionHint=find(echo,/再用动作回应此刻的自己/);
+const stats=find(echo,/给自己的回应 \d+ 次/);
+assert.ok(actionHint&&stats,'动作说明与状态条都应存在');
 assert.ok(actionHint.bottom<=stats.top,`说明(${actionHint.bottom}) 不得压到状态条(${stats.top})`);
 const actSource=find(echo,/^这一幕陪你的人/);
 if(actSource)assert.ok(echoItem.bottom<=actSource.top,`回声(${echoItem.bottom}) 不得压到来源行(${actSource.top})`);
 
 // 5. 幕间呼吸 + 走到结尾：幕数不写死（本地 5 幕 / 模型 3 幕）
 // 两段式选择：先选中一条路，隔一下再按 Enter 确认——确认之后才有幕间呼吸
+// 先等这一幕的静默期过去，否则选择会被 inputLockUntil 挡掉
+for(let i=0;i<20;i++){const ready=await p.evaluate(()=>{const s=window.__game.scene.getScene('StoryScene');return s.time.now>s.inputLockUntil+300;});if(ready)break;await p.waitForTimeout(400);}
 await p.keyboard.press('ArrowLeft',{delay:100});await p.waitForTimeout(500);
 await p.keyboard.press('Enter',{delay:100});await p.waitForTimeout(500);
 const mid=await read();
@@ -107,14 +126,29 @@ await p.keyboard.press('s',{delay:100});await p.waitForTimeout(600);
 assert.match((await readEnding()).texts,/已收进/,'按 S 之后按钮应变成已收进');
 
 // 8. 从首页进「我的故事集」，这一程要出现在列表里（含真实来源与写下的那句话）
-await p.keyboard.press('Enter',{delay:100});await p.waitForTimeout(600);      // 回首页
-await p.mouse.click(553,664);await p.waitForTimeout(900);                     // 我的故事集按钮
+await p.keyboard.press('Enter',{delay:100});await p.waitForTimeout(900);      // 结束页 Enter = 回首页
+// 点击位置从场景里读，不再写死坐标——以前写死的那个点落在设计空间 (369,443)，
+// 和「我的故事集」的真实位置根本没关系，版面一动就必然失效。
+const link=await p.evaluate(()=>{
+  const g=window.__game;const s=g.scene.getScene('MenuScene');const cam=s.cameras.main;
+  const t=s.children.list.find(o=>o.type==='Text'&&o.text==='我的故事集');
+  if(!t)return null;
+  const b=t.getBounds();const rect=g.canvas.getBoundingClientRect();
+  const k=rect.width/cam.width;                       // 画布 CSS 像素 / 游戏像素
+  return {x:rect.x+rect.width/2+(b.centerX-cam.midPoint.x)*cam.zoom*k,
+          y:rect.y+rect.height/2+(b.centerY-cam.midPoint.y)*cam.zoom*k};
+});
+assert.ok(link,'首页应能找到「我的故事集」入口');
+await p.mouse.click(link.x,link.y);await p.waitForTimeout(900);
 const shelf=await p.evaluate(async()=>{const {game}=await import(document.querySelector('script[src*="main.ts"]').src);
   if(!game.scene.isActive('SampleScene'))return null;
   const s=game.scene.getScene('SampleScene');const out=[];const visit=l=>{for(const o of l){if(o.type==='Text'&&o.text)out.push(o.text);if(o.list)visit(o.list);}};visit(s.children.list);
   return out.join('\n');});
 assert.ok(shelf,'应进入「我的故事集」');
-assert.match(shelf,/这一程 · .*考研/,'故事集里应出现这一程');
+// 结构性断言：以前这里写死 /考研/，但卡片列表是内容相关的（第 2 张早就不是考研），
+// 写死主题会随列表变化误报。这里只验「这一程被记下来、且带着这一局的心事」，
+// 「记的不能是别的主题」由上面那条 notEqual('风从辞职那天吹来') 与署名断言守着。
+assert.match(shelf,/这一程 · .{4,}/,'故事集里应出现这一程，并带上这一局的心事');
 assert.ok(shelf.includes(mine),'故事集里应出现写给自己的话');
 assert.match(shelf,/陪你的人：/,'故事集里应标出陪你的人（知乎作者或本地示例）');
 await p.screenshot({path:'test/shelf-journal-check.png'});

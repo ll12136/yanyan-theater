@@ -47,6 +47,14 @@ export interface EncouragementQuery {
   stats?: Record<string, number>;
 }
 
+/** 知乎登录的配置与登录态，由服务端 /api/auth/status 提供 */
+export interface AuthStatus {
+  /** 三个 ZHIHU_OAUTH_* 环境变量是否齐全；false 时 /api/auth/zhihu/login 一定返回 503 */
+  configured: boolean;
+  loggedIn: boolean;
+  profile?: { id: string; name: string; avatarUrl?: string; headline?: string };
+}
+
 /** 一个声音 = 一条知乎真实内容。正文、作者、来源都由服务端从知乎接口取回，前端只展示。 */
 export interface ZhihuVoice {
   kind: VoiceKind;
@@ -182,6 +190,17 @@ export class ApiClient {
       },
       45000
     );
+  }
+
+  /**
+   * 查询知乎登录状态。返回 null 表示查不到（服务端没起、超时等），
+   * 调用方应当按「未配置」处理——宁可少显示一个登录入口，也不要摆一个点了必然报错的入口。
+   *
+   * 超时给得短：这是首屏的一个装饰性判断，不该拖慢任何东西。
+   * 带 ?t= 是为了绕开 get() 里 5 分钟的缓存——登录态是会变的。
+   */
+  async fetchAuthStatus(): Promise<AuthStatus | null> {
+    return this.get<AuthStatus>(`/auth/status?t=${Date.now()}`, 4000);
   }
 }
 

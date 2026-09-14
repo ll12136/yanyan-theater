@@ -28,6 +28,12 @@ export const store = {
   api: new ApiClient(),
   /** AI 生成的剧情 JSON（null 表示失败/未调用，走本地故事） */
   aiStory: null as Record<string, unknown> | null,
+  /**
+   * 上一次没来得及用的改编剧情，留给下一局直接用。
+   * 之所以要它：改编必须在开演前定下来，否则就会把玩家正在读的故事整个换掉；
+   * 模型偶尔慢过等待上限，那一次的成果存这儿，下一局直接拿来用，不浪费。
+   */
+  cachedAiStory: null as { trouble: string | null; story: Record<string, unknown> } | null,
   /** 真实知乎烦恼（从知识列表拉取，null 表示未加载） */
   realTroubles: null as Trouble[] | null,
   /** 当前选中的真实烦恼文本 */

@@ -9,6 +9,9 @@ const reachStory=async(p)=>{
   // 剧情改写接口固定回 503：这一页留在玩家自己的本地剧情上，
   // 「换幕」的时机才是可复现的（模型什么时候回来是它自己的事，见 story-check.cjs）。
   await p.route('**/api/story/generate',r=>r.fulfill({status:503,contentType:'application/json',body:'{"error":"deepseek unavailable"}'}));
+  // 登录墙与「没做选择就不许换幕」无关：把登录态 mock 成「未配置」，
+  // 主按钮才会直接开演，而不是跳去知乎授权页。
+  await p.route('**/api/auth/status**',r=>r.fulfill({status:200,contentType:'application/json',body:'{"configured":false,"loggedIn":false}'}));
   await p.goto('http://localhost:5174/');await p.waitForTimeout(900);
   await p.keyboard.press('Enter',{delay:100});await p.waitForTimeout(700);
   await p.mouse.click(480,556);await p.waitForTimeout(800);

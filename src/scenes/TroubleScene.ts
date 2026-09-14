@@ -196,6 +196,8 @@ export class TroubleScene extends SharpScene {
     // 卡片只展示摘要，完整心事会在后续详情阶段显示。
     // 以字符数先做一道上限，避免文本被容器无提示地裁掉。
     // 当前卡片正文宽度约可容纳 11 个汉字/行，控制在 32 字以内可稳定保持三行。
+    // 卡片 250 宽、左右各留 17px 内边距，内容区就是 216
+    const textWidth = 216;
     const [title, ...rest] = trouble.text.split('\n');
     const summary = rest.join(' ').trim();
     const text = this.add
@@ -203,7 +205,7 @@ export class TroubleScene extends SharpScene {
         fontFamily: 'system-ui, sans-serif',
         fontSize: '15px', fontStyle: 'bold',
         color: css(THEME.text),
-        wordWrap: { width: 216, useAdvancedWrap: true }
+        wordWrap: { width: textWidth, useAdvancedWrap: true }
       })
       .setOrigin(0, 0);
     const count = this.add
@@ -214,17 +216,32 @@ export class TroubleScene extends SharpScene {
       })
       .setOrigin(0, 0.5);
     bg.disableInteractive();
-    category.setWordWrapWidth(216, true);
-    for (const [item, height] of [[category, 14], [text, 20], [count, 16]] as const) {
-      let value = item.text;
-      while (item.height > height && value.length > 0) {
-        value = Array.from(value).slice(0, -1).join('');
-        item.setText(`${value}…`);
-      }
-    }
+    category.setWordWrapWidth(textWidth, true);
+    // 三行都只占一行：分类 / 标题 / 摘要。截断必须同时看宽度和高度——
+    // 原来只按高度截，而 11px 摘要行的高度本来就低于上限，于是整行不裁，
+    // 24 个汉字约 273px 直接冲出 216px 的内容区、压到旁边那张卡上。
+    this.fitCardText(category, textWidth, 14);
+    this.fitCardText(text, textWidth, 20);
+    this.fitCardText(count, textWidth, 16);
     const group=this.add.container(cx,cy);
     for(const child of [bg,category,text,count]) { child.x-=cx; child.y-=cy; group.add(child); }
     return group;
+  }
+
+  /**
+   * 把一行文字截到既不超出宽度、也不高于上限，超出部分用 … 收尾。
+   * 关键是宽度也要管：只按高度截的话，11px 的摘要行高度（约 15）永远低于上限 16，
+   * 那一行就一次都不会被裁，长文案会直接冲出卡片。
+   */
+  private fitCardText(item: Phaser.GameObjects.Text, maxWidth: number, maxHeight: number): void {
+    if (item.width <= maxWidth && item.height <= maxHeight) return;
+    const value = Array.from(item.text);
+    while (value.length > 0) {
+      value.pop();
+      item.setText(`${value.join('')}…`);
+      if (item.width <= maxWidth && item.height <= maxHeight) return;
+    }
+    item.setText('');
   }
 
   private highlightCard(index: number): void {
