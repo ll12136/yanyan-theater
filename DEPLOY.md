@@ -117,3 +117,5 @@ grep -rIn --exclude-dir=node_modules -E "sk-[A-Za-z0-9]{16,}|ACCESS_SECRET\s*=\s
 4. 接完再回活动页面把「知乎登录回调地址」填上。
 
 详细协议见黑客松 skill 的 `references/hackathon-oauth.md` 与 `oauth.md`。
+
+<!-- OAuth deployment verification: 2026-09-14 -->
