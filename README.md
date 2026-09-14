@@ -41,6 +41,17 @@ cd server && npm run dev
 npm run dev          # http://localhost:5173
 ```
 
+构建与"线上形态"本地预览（**前端与接口同源，一个进程**，和部署后完全一致）：
+
+```bash
+npm run build                 # tsc 类型检查 + vite 打包到 dist/
+npm start                     # 只跑这一个：dist/ + /api 一起发到 http://localhost:3000
+node test/deploy-smoke.cjs http://localhost:3000   # 用真实浏览器验收这条链路
+```
+
+部署成公网 Demo（黑客松必交的"可运行体验链接"）见 **`DEPLOY.md`**；
+参与提交的产品说明见 **`产品说明计划书.md`**。
+
 构建与预览：
 
 ```bash
