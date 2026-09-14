@@ -1,0 +1,8 @@
+node_modules/
+server/node_modules/
+dist/
+art/*.png
+test/*.png
+.env
+.env.*
+!.env.example

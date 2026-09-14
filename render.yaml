@@ -1,0 +1,21 @@
+# 看山问你，睡了吗？（知乎黑客松 2026 · 跨次元游乐场）
+# 一个进程同时发前端 dist/ 与 /api（知乎内容 + DeepSeek 改编），部署时不要拆成两个服务。
+services:
+  - type: web
+    name: kanshan-sleep
+    runtime: node
+    plan: free
+    # 前端要先构建出 dist/，服务端再装自己的依赖（tsx 放在 dependencies 里，生产也能跑）
+    buildCommand: npm install && npm run build && npm install --prefix server
+    startCommand: npm --prefix server start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      # DeepSeek key：在 Render 面板里手填，不要写进仓库。
+      # 不配也能玩：剧情退化为本地示例剧情、三个声音退化为主题词表匹配。
+      - key: DEEPSEEK_API_KEY
+        sync: false
+      # 可选：配了才能用知乎搜索/直答（未配时「知乎原文」回落到站内搜索页，如实标注）
+      - key: ZHIHU_ACCESS_SECRET
+        sync: false

@@ -1,0 +1,23 @@
+{
+  "name": "yanyan-theater",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "看山问你，睡了吗？ - 睡眠主题的体感互动叙事（知乎黑客松 2026 跨次元游乐场）",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "start": "npm --prefix server start",
+    "typecheck": "tsc && npm --prefix server run typecheck",
+    "art": "node tools/gen-trouble-art.mjs",
+    "art:avatar": "node tools/gen-avatar-art.mjs"
+  },
+  "dependencies": {
+    "phaser": "^3.90.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vite": "^6.0.7"
+  }
+}
