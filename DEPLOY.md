@@ -27,9 +27,12 @@
 
 1. 把仓库推到 GitHub / Gitee（见下方「代码仓库」）。
 2. Render 控制台 → **New → Blueprint** → 选这个仓库，它会读根目录的 `render.yaml`：
-   - Build：`npm install && npm run build && npm install --prefix server`
+   - Build：`npm install --include=dev && npm run build && npm install --include=dev --prefix server`
    - Start：`npm --prefix server start`
    - 健康检查：`/api/health`
+
+   > `--include=dev` 别省：平台若设了 `NODE_ENV=production`，`npm install` 会跳过 devDependencies，
+   > `tsc` / `vite` 就没了，构建会在第一步失败。
 3. 在环境变量里手填 `DEEPSEEK_API_KEY`（`render.yaml` 里已经声明为 `sync: false`，不会进仓库）。
 4. 部署完把域名（形如 `https://kanshan-sleep.onrender.com`）填进活动页面的「作品链接」。
 
@@ -38,7 +41,7 @@
 
 ## 方式二：Railway / Zeabur（用仓库里的 `Dockerfile`）
 
-- Build：`npm install && npm run build && npm install --prefix server`
+- Build：`npm install --include=dev && npm run build && npm install --include=dev --prefix server`
 - Start：`npm --prefix server start`
 - 或者直接选 **Dockerfile** 部署（构建里已经包含前端打包）。
 - 端口用平台注入的 `PORT`；容器内 Expose 3000。
@@ -53,7 +56,7 @@ docker run -d --name kanshan-sleep -p 80:3000 \
   kanshan-sleep
 
 # 裸跑（服务器上装了 Node 20+）
-npm install && npm run build && npm install --prefix server
+npm install --include=dev && npm run build && npm install --include=dev --prefix server
 PORT=3000 DEEPSEEK_API_KEY=sk-xxxx npm start
 ```
 
@@ -93,6 +96,13 @@ git push -u origin main
 ```bash
 grep -rIn --exclude-dir=node_modules -E "sk-[A-Za-z0-9]{16,}|ACCESS_SECRET\s*=\s*['\"]" . || echo "没有发现凭证"
 ```
+
+## 这份说明里哪些验过、哪些没验
+
+- **验过**：上面那串 Build / Start 命令（在本机按同样顺序跑通，包括故意设 `NODE_ENV=production` 的情况）；
+  生产包在"一个进程同源发 dist + /api"下可完整上手（`node test/deploy-smoke.cjs`，含不配任何 key 的降级路径）。
+- **没验**：`Dockerfile` 的实际 `docker build`（开发机上没有 Docker，里面的命令与上面验过的裸跑命令一一对应）；
+  各平台控制台的具体点击路径；公网域名与 HTTPS 的实际访问。第一次部署后用上面「部署后必做自检」两条命令确认。
 
 ## 知乎登录（OAuth）——本项目当前没接
 

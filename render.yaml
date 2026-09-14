@@ -5,8 +5,10 @@ services:
     name: kanshan-sleep
     runtime: node
     plan: free
-    # 前端要先构建出 dist/，服务端再装自己的依赖（tsx 放在 dependencies 里，生产也能跑）
-    buildCommand: npm install && npm run build && npm install --prefix server
+    # 前端要先构建出 dist/，服务端再装自己的依赖（tsx 放在 dependencies 里，生产也能跑）。
+    # --include=dev 是必须的：平台若设了 NODE_ENV=production，npm 会跳过 devDependencies，
+    # tsc / vite 就没了，构建会在第一步失败。
+    buildCommand: npm install --include=dev && npm run build && npm install --include=dev --prefix server
     startCommand: npm --prefix server start
     healthCheckPath: /api/health
     envVars:
