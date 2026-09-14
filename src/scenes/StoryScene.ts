@@ -54,7 +54,27 @@ export class StoryScene extends SharpScene {
   private responseHint!: Phaser.GameObjects.Text;
   private statsText!: Phaser.GameObjects.Text;
   private breath!: Phaser.GameObjects.Container;
+  private breathTitle!: Phaser.GameObjects.Text;
   private breathText!: Phaser.GameObjects.Text;
+  /** 呼吸关：一个跟着放大缩小的圆环 + 第几轮 + 你跟上了几次 */
+  private breathRing!: Phaser.GameObjects.Arc;
+  private breathPhaseText!: Phaser.GameObjects.Text;
+  private breathCountText!: Phaser.GameObjects.Text;
+  private breathHintText!: Phaser.GameObjects.Text;
+  private breathNext: (() => void) | null = null;
+  private breathTimer: Phaser.Time.TimerEvent | null = null;
+  private breathRound = 1;
+  private breathPhaseIn = true;
+  private breathFollowed = 0;
+  private breathFollowedThisPhase = false;
+  /** 一轮跟着做的呼吸只出现一次：后面几幕的幕间回到原来那层安静的留白 */
+  private breathGateDone = false;
+  /** 左margin的夜里时间轴：22:30 → 01:30，走到哪一格看得见 */
+  private timelineObjs: Phaser.GameObjects.GameObject[] = [];
+  /** 右上角那团心事：每完成一幕、每给自己一次回应，它就小一点、暖一点 */
+  private worryCloud!: Phaser.GameObjects.Container;
+  private worryCloudScale = 1;
+  private worryFloatText!: Phaser.GameObjects.Text;
   private selfNoteDialog: HTMLDialogElement | null = null;
 
   private run = 0;
@@ -81,6 +101,9 @@ export class StoryScene extends SharpScene {
     this.run++;
     this.events.once('shutdown', () => {
       this.run++;
+      this.breathTimer?.remove();
+      this.breathTimer = null;
+      this.breathNext = null;
       this.selfNoteDialog?.remove();
       this.selfNoteDialog = null;
     });
@@ -194,6 +217,16 @@ export class StoryScene extends SharpScene {
     this.breath = this.makeBreath();
     this.breath.setVisible(false);
 
+    // 夜里的时间轴（左边距）与右上角那团心事：让"走到哪儿了""松了多少"看得见
+    this.timelineObjs = [];
+    this.worryCloud = this.makeWorryCloud();
+    this.worryCloudScale = 1;
+    this.breathGateDone = false;
+    this.breathNext = null;
+    this.breathRound = 1;
+    this.breathPhaseIn = true;
+    this.breathFollowed = 0;
+
     this.inputMgr = new InputManager(this, (action) => this.onAction(action));
 
     // 先用本地剧情保证可玩，再异步换成基于知乎原文的改编剧情
@@ -274,9 +307,15 @@ export class StoryScene extends SharpScene {
     this.renderScene(true);
   }
 
-  /** 换幕：先淡入一层呼吸，再出现下一幕 */
+  /** 普通幕间：一层安静的留白（跟着做过的呼吸只有第一次） */
   private breathe(next: () => void): void {
     this.transitioning = true;
+    this.breathTitle.setText('先停一下，呼吸一次。');
+    this.breathText.setText('不用急着睡着，你已经在安顿自己了。');
+    this.breathPhaseText.setText('');
+    this.breathCountText.setText('');
+    this.breathHintText.setText('');
+    this.breathRing.setScale(1).setStrokeStyle(2.5, THEME.green, 0.85);
     this.breath.setVisible(true).setAlpha(0);
     this.tweens.add({
       targets: this.breath,
@@ -297,6 +336,197 @@ export class StoryScene extends SharpScene {
         });
       }
     });
+  }
+
+  private static readonly BREATH_ROUNDS = 3;
+  private static readonly BREATH_PHASE_MS = 3200;
+
+  /**
+   * 第一次换幕：把「先停一下」变成真的跟着做一次呼吸。
+   * 体感的四个身体动作（左手抬起 / 右手抬起 / 挥砍 / 下压）或键盘对应键都算跟上；
+   * Enter 跳过——不评判、不逼人，跳过只是少了那一点加成。
+   */
+  private startBreathGate(next: () => void): void {
+    this.transitioning = true;
+    this.breathNext = next;
+    this.breathRound = 1;
+    this.breathPhaseIn = true;
+    this.breathFollowed = 0;
+    this.breathTitle.setText('跟着做一次呼吸');
+    this.breathText.setText('吸的时候把气放长，呼的时候把肩膀放下来。');
+    this.breathHintText.setText('左边抬起 / 右边抬起 / 挥砍 / 下压 都算跟上 · Enter 跳过');
+    this.breath.setVisible(true).setAlpha(0);
+    this.tweens.add({ targets: this.breath, alpha: 1, duration: 420, onComplete: () => this.tickBreath() });
+  }
+
+  private tickBreath(): void {
+    if (!this.breathNext) return;
+    this.breathFollowedThisPhase = false;
+    const inhale = this.breathPhaseIn;
+    this.breathPhaseText.setText(inhale ? '吸气 · 慢慢来' : '呼气 · 把它放长');
+    this.breathPhaseText.setColor(css(inhale ? THEME.green : THEME.warm));
+    this.updateBreathCount();
+    this.tweens.killTweensOf(this.breathRing);
+    this.breathRing.setScale(inhale ? 0.74 : 1.18);
+    this.tweens.add({
+      targets: this.breathRing,
+      scale: inhale ? 1.18 : 0.74,
+      duration: StoryScene.BREATH_PHASE_MS,
+      ease: 'Sine.easeInOut'
+    });
+    this.breathTimer?.remove();
+    this.breathTimer = this.time.delayedCall(StoryScene.BREATH_PHASE_MS, () => {
+      if (!this.breathNext) return;
+      if (this.breathPhaseIn) {
+        this.breathPhaseIn = false;
+        this.tickBreath();
+        return;
+      }
+      this.breathRound += 1;
+      if (this.breathRound > StoryScene.BREATH_ROUNDS) {
+        this.endBreath(true);
+        return;
+      }
+      this.breathPhaseIn = true;
+      this.tickBreath();
+    });
+  }
+
+  private updateBreathCount(): void {
+    const round = Math.min(this.breathRound, StoryScene.BREATH_ROUNDS);
+    this.breathCountText.setText(`第 ${round} / ${StoryScene.BREATH_ROUNDS} 轮 · 你跟上了 ${this.breathFollowed} 次`);
+  }
+
+  /** 呼吸关里的输入：身体动作算跟上，Enter 算跳过，方向键不参与（免得被误触跳过） */
+  private onBreathInput(action: GameAction): void {
+    if (action === 'confirm') {
+      this.endBreath(false);
+      return;
+    }
+    if (!['slash', 'hug', 'nod', 'dodge', 'investigate'].includes(action)) return;
+    if (this.breathFollowedThisPhase) return;
+    this.breathFollowedThisPhase = true;
+    this.breathFollowed += 1;
+    this.updateBreathCount();
+    this.breathRing.setStrokeStyle(3.5, THEME.warm, 1);
+    this.time.delayedCall(240, () => {
+      if (this.breathNext) this.breathRing.setStrokeStyle(2.5, this.breathPhaseIn ? THEME.green : THEME.warm, 0.85);
+    });
+  }
+
+  private endBreath(completed: boolean): void {
+    const next = this.breathNext;
+    if (!next) return;
+    this.breathNext = null;
+    this.breathTimer?.remove();
+    this.breathTimer = null;
+    this.tweens.killTweensOf(this.breathRing);
+    this.breathGateDone = true;
+    this.breathPhaseText.setText('');
+    this.breathCountText.setText('');
+    this.breathHintText.setText('');
+    const followed = this.breathFollowed;
+    if (completed && followed >= 2) {
+      // 真的跟着做了才给这一点加成；跳过不加也不减
+      store.engine.applyChoice({ acceptance: 2, courage: 1 });
+      this.breathTitle.setText('做完了三轮');
+      this.breathText.setText(`你跟上了 ${followed} 次 · 接纳 +2 · 放松 +1`);
+      this.time.delayedCall(1100, () => this.finishBreath(next));
+      return;
+    }
+    this.breathTitle.setText(completed ? '做完了三轮' : '这次先跳过');
+    this.breathText.setText(completed ? '跟上几次都算，不用做得多标准。' : '什么时候想做了再来，跳过也没关系。');
+    this.time.delayedCall(completed ? 900 : 460, () => this.finishBreath(next));
+  }
+
+  private finishBreath(next: () => void): void {
+    next();
+    this.updateStats();
+    this.tweens.add({
+      targets: this.breath,
+      alpha: 0,
+      duration: 520,
+      onComplete: () => {
+        this.breath.setVisible(false);
+        this.transitioning = false;
+      }
+    });
+  }
+
+  /** 夜里的时间轴：五幕就是 22:30 → 01:30 的五个格子 */
+  private updateNightTimeline(): void {
+    for (const obj of this.timelineObjs) obj.destroy();
+    this.timelineObjs = [];
+    const n = this.sceneNodes.length;
+    if (n === 0) return;
+    const x = 80;
+    const top = 190;
+    const bottom = 470;
+    const yOf = (i: number) => (n === 1 ? (top + bottom) / 2 : top + (i * (bottom - top)) / (n - 1));
+    const timeOf = (i: number) => {
+      const start = 22 * 60 + 30; // 22:30
+      const mins = n === 1 ? start : start + (i * 180) / (n - 1); // → 01:30
+      const h = Math.floor((mins % 1440) / 60);
+      const m = Math.round(mins % 60);
+      return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+    };
+    const line = this.add.graphics();
+    line.lineStyle(1, THEME.line, 0.9).lineBetween(x, top, x, bottom);
+    this.timelineObjs.push(line);
+    this.timelineObjs.push(
+      this.add
+        .text(x, top - 24, '今夜', { fontFamily: 'Microsoft YaHei', fontSize: '11px', color: css(THEME.faint) })
+        .setOrigin(0.5)
+    );
+    for (let i = 0; i < n; i += 1) {
+      const y = yOf(i);
+      const done = i < this.sceneIndex;
+      const now = i === this.sceneIndex;
+      const dot = this.add.circle(x, y, now ? 5 : 3.5, now ? THEME.warm : done ? THEME.green : THEME.paper, now || done ? 1 : 0.9);
+      if (!now && !done) dot.setStrokeStyle(1, THEME.line, 1);
+      this.timelineObjs.push(dot);
+      this.timelineObjs.push(
+        this.add
+          .text(x - 12, y, timeOf(i), {
+            fontFamily: 'system-ui, sans-serif',
+            fontSize: '10px',
+            color: css(now ? THEME.warm : done ? THEME.muted : THEME.faint)
+          })
+          .setOrigin(1, 0.5)
+      );
+    }
+  }
+
+  /** 心事云：走过一幕、给过自己一次回应，就小一点、暖一点 */
+  private updateWorryCloud(pop = false, label = ''): void {
+    const acts = Math.max(1, this.sceneNodes.length);
+    const byWalk = Math.min(1, this.sceneIndex / acts);
+    const bySelf = Math.min(1, this.actionCount / 6);
+    const eased = 0.45 * byWalk + 0.55 * bySelf;
+    const scale = Math.max(0.44, 1 - 0.56 * eased);
+    const color = mixHex(0x8f9ec4, 0xf0c98a, Math.min(1, eased * 1.2));
+    for (const child of this.worryCloud.list) {
+      if (child instanceof Phaser.GameObjects.Arc) child.setFillStyle(color, 0.92);
+    }
+    this.tweens.add({
+      targets: this.worryCloud,
+      scale,
+      duration: pop ? 520 : 640,
+      ease: pop ? 'Back.easeOut' : 'Sine.easeOut'
+    });
+    this.worryCloudScale = scale;
+    if (label) {
+      this.tweens.killTweensOf(this.worryFloatText);
+      this.worryFloatText.setText(label).setY(-36).setAlpha(1);
+      this.tweens.add({
+        targets: this.worryFloatText,
+        y: -54,
+        alpha: 0,
+        duration: 1150,
+        ease: 'Sine.easeOut',
+        onComplete: () => this.worryFloatText.setY(-36)
+      });
+    }
   }
 
   /** 这一幕的正文要逐字浮现多久；太短的一句话不逐字，直接给完整的 */
@@ -339,16 +569,51 @@ export class StoryScene extends SharpScene {
     return `这一幕陪你的人：知乎 · @${voice.author}《${voice.title}》`;
   }
 
+  /**
+   * 幕间留白。第一次换幕时这一层会变成「跟着做一次呼吸」：
+   * 一个会放大缩小的圆环 + 第几轮，体感的手势或键盘的身体键都算跟上，Enter 可以跳过。
+   */
   private makeBreath(): Phaser.GameObjects.Container {
     const veil = roundedRect(this, 0, 0, 960, 640, 0, THEME.bg2, 1).disableInteractive();
-    const line = this.add
-      .text(480, 316, '先停一下，呼吸一次。', { fontFamily: 'Microsoft YaHei', fontSize: '22px', color: css(THEME.text) })
+    this.breathRing = this.add.circle(480, 268, 88).setStrokeStyle(2.5, THEME.green, 0.85);
+    this.breathTitle = this.add
+      .text(480, 268, '先停一下，呼吸一次。', { fontFamily: 'Microsoft YaHei', fontSize: '20px', color: css(THEME.text), align: 'center' })
+      .setOrigin(0.5);
+    this.breathPhaseText = this.add
+      .text(480, 372, '', { fontFamily: 'Microsoft YaHei', fontSize: '19px', color: css(THEME.warm) })
       .setOrigin(0.5);
     this.breathText = this.add
-      .text(480, 352, '不用急着睡着，你已经在安顿自己了。', { fontFamily: 'Microsoft YaHei', fontSize: '14px', color: css(THEME.muted) })
+      .text(480, 330, '不用急着睡着，你已经在安顿自己了。', { fontFamily: 'Microsoft YaHei', fontSize: '14px', color: css(THEME.muted) })
       .setOrigin(0.5);
-    const container = this.add.container(0, 0, [veil, line, this.breathText]).setDepth(30);
+    this.breathCountText = this.add
+      .text(480, 412, '', { fontFamily: 'Microsoft YaHei', fontSize: '13px', color: css(THEME.muted) })
+      .setOrigin(0.5);
+    this.breathHintText = this.add
+      .text(480, 470, '', { fontFamily: 'Microsoft YaHei', fontSize: '12px', color: css(THEME.faint), align: 'center' })
+      .setOrigin(0.5);
+    const container = this.add
+      .container(0, 0, [veil, this.breathRing, this.breathTitle, this.breathText, this.breathPhaseText, this.breathCountText, this.breathHintText])
+      .setDepth(30);
     container.setVisible(false);
+    return container;
+  }
+
+  /**
+   * 右上角那团心事：现在它整局都在。
+   * 你每往前走一幕、每给自己一次回应，它就小一点、暖一点——这是"看得见的进度"，
+   * 比状态条上那几个数字更像在玩。
+   */
+  private makeWorryCloud(): Phaser.GameObjects.Container {
+    const container = this.add.container(916, 126).setDepth(4);
+    const circles: [number, number, number][] = [[-16, 4, 13], [0, -6, 18], [15, 2, 14], [-7, 11, 12], [9, 12, 10]];
+    for (const [dx, dy, r] of circles) {
+      container.add(this.add.circle(dx, dy, r, 0x8f9ec4, 0.92));
+    }
+    this.worryFloatText = this.add
+      .text(0, -36, '', { fontFamily: 'Microsoft YaHei', fontSize: '11px', color: css(THEME.warm) })
+      .setOrigin(0.5)
+      .setAlpha(0);
+    container.add(this.worryFloatText);
     return container;
   }
 
@@ -393,6 +658,8 @@ export class StoryScene extends SharpScene {
       '先选一条故事路径，再用动作回应此刻的自己'
     );
     this.updateStats();
+    this.updateNightTimeline();
+    this.updateWorryCloud();
     if (fade) {
       this.sceneText.setAlpha(0);
       this.tweens.add({ targets: this.sceneText, alpha: 1, duration: 700 });
@@ -449,6 +716,9 @@ export class StoryScene extends SharpScene {
     const choice = this.selectedSlot === 'A' ? node.optionA : node.optionB;
     this.interacted = true;
     store.engine.applyChoice(choice.effect);
+    // 选完了就把灯收掉：幕间那一层不该还留着上一幕的选中态
+    this.selectedSlot = null;
+    this.paintOptions();
     void this.showChoiceEncouragement(choice.label);
     this.nextScene();
   }
@@ -474,6 +744,11 @@ export class StoryScene extends SharpScene {
   }
 
   private onAction(action: GameAction): void {
+    // 幕间那次「跟着做一次呼吸」自己吃输入：身体动作算跟上，Enter 算跳过
+    if (this.breathNext) {
+      this.onBreathInput(action);
+      return;
+    }
     if (this.transitioning) return;
     const node = this.sceneNodes[this.sceneIndex];
     if (!node) return;
@@ -511,6 +786,8 @@ export class StoryScene extends SharpScene {
       this.echoText.setAlpha(0.4);
       this.tweens.add({ targets: this.echoText, alpha: 1, duration: 320 });
       this.updateStats();
+      // 每给自己一次回应，右上角那团心事就缩一下、飘一句
+      this.updateWorryCloud(true, action === 'slash' ? '松开一点' : action === 'dodge' ? '歇一会儿' : action === 'investigate' ? '看清一点' : '陪着自己');
     }
   }
 
@@ -577,12 +854,16 @@ export class StoryScene extends SharpScene {
   }
 
   private nextScene(): void {
+    const firstChoice = this.sceneIndex === 0;
     this.sceneIndex += 1;
-    if (this.sceneIndex < this.sceneNodes.length) {
-      this.breathe(() => this.renderScene(true));
-    } else {
+    if (this.sceneIndex >= this.sceneNodes.length) {
       void this.askSelfNote();
+      return;
     }
+    const next = () => this.renderScene(true);
+    // 第一幕选完之后那一次幕间，是唯一一次「跟着做」的呼吸
+    if (firstChoice && !this.breathGateDone) this.startBreathGate(next);
+    else this.breathe(next);
   }
 
   /**
@@ -654,6 +935,18 @@ export class StoryScene extends SharpScene {
     dialog.showModal();
     input.focus();
   }
+}
+
+/** 两个颜色按比例混一下：心事云从冷月色走到暖金，靠它插值 */
+function mixHex(from: number, to: number, t: number): number {
+  const k = Math.max(0, Math.min(1, t));
+  const fr = (from >> 16) & 255;
+  const fg = (from >> 8) & 255;
+  const fb = from & 255;
+  const tr = (to >> 16) & 255;
+  const tg = (to >> 8) & 255;
+  const tb = to & 255;
+  return ((fr + (tr - fr) * k) << 16) | (((fg + (tg - fg) * k) | 0) << 8) | ((fb + (tb - fb) * k) | 0);
 }
 
 /** 把 AI 生成的场景 JSON 转成本地 StorySceneNode 格式 */
