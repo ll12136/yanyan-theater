@@ -2,6 +2,9 @@
 // 鉴权：Authorization: Bearer <Access Secret> + X-Request-Timestamp（秒级）
 // 参考：https://developer.zhihu.com
 
+// 下面两行在模块顶层就读 process.env，所以 .env 必须在本次求值前加载完。
+import './env.js';
+
 const ZHIHU_ACCESS_SECRET = process.env.ZHIHU_ACCESS_SECRET ?? '';
 const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY ?? '';
 

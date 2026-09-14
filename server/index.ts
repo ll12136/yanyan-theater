@@ -1,3 +1,5 @@
+// 必须排在所有读 process.env 的模块之前：zhihu.js 在模块顶层就读 env 成常量了。
+import './env.js';
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import { readFile } from 'node:fs/promises';
@@ -13,9 +15,15 @@ import {
 } from './zhihu.js';
 import { buildVoices } from './voices.js';
 import { buildEncouragements } from './encouragements.js';
+import crypto from 'node:crypto';
 
 const app = Fastify({ logger: false });
 await app.register(cors, { origin: true });
+type ZhihuProfile = { id: string; name: string; avatarUrl?: string; headline?: string };
+type Session = { profile: ZhihuProfile; expiresAt: number };
+const oauthStates = new Map<string, number>();
+const sessions = new Map<string, Session>();
+const SESSION_COOKIE = 'kanshan_session';
 
 // 健康检查
 app.get('/api/health', async () => {
@@ -25,6 +33,95 @@ app.get('/api/health', async () => {
     deepseekConfigured: Boolean(process.env.DEEPSEEK_API_KEY)
   };
 });
+
+// OAuth 配置状态：前端据此决定是否显示登录入口，不伪造“已登录”。
+app.get('/api/auth/status', async (req) => {
+  const sid = readCookie(req.headers.cookie, SESSION_COOKIE); const session = sid ? sessions.get(sid) : undefined;
+  if (session && session.expiresAt > Date.now()) return { configured: true, loggedIn: true, profile: session.profile };
+  return { configured: Boolean(process.env.ZHIHU_OAUTH_APP_ID && process.env.ZHIHU_OAUTH_APP_KEY && process.env.ZHIHU_OAUTH_REDIRECT_URI), loggedIn: false };
+});
+app.get('/api/auth/zhihu/login', async (_req, reply) => {
+  const { ZHIHU_OAUTH_APP_ID, ZHIHU_OAUTH_REDIRECT_URI } = process.env;
+  if (!ZHIHU_OAUTH_APP_ID || !process.env.ZHIHU_OAUTH_APP_KEY || !ZHIHU_OAUTH_REDIRECT_URI) return reply.code(503).send({ error: '知乎登录尚未配置，请设置 OAuth 环境变量' });
+  const state = crypto.randomUUID();
+  oauthStates.set(state, Date.now() + 10 * 60_000);
+  const url = new URL('https://openapi.zhihu.com/authorize');
+  url.searchParams.set('app_id', ZHIHU_OAUTH_APP_ID); url.searchParams.set('response_type', 'code'); url.searchParams.set('redirect_uri', ZHIHU_OAUTH_REDIRECT_URI); url.searchParams.set('state', state);
+  return reply.header('set-cookie', `kanshan_oauth_state=${state}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600`).redirect(url.toString());
+});
+const oauthCallback = async (req: Parameters<typeof app.get>[1] extends never ? never : any, reply: any) => {
+  // 回调里的授权码参数名是 authorization_code（官方 references/hackathon-oauth.md 与 oauth.md 都写明），
+  // 不是通用 OAuth2 的 code。文档允许接收端同时接受两者以防协议修订，这里就都收。
+  const { authorization_code: authCode, code: codeAlias, state, error } = req.query as {
+    authorization_code?: string; code?: string; state?: string; error?: string;
+  };
+  const code = authCode ?? codeAlias;
+  const cookieState = readCookie(req.headers.cookie, 'kanshan_oauth_state');
+  const valid = Boolean(state && cookieState === state && oauthStates.get(state) && (oauthStates.get(state) as number) > Date.now());
+  if (state) oauthStates.delete(state);
+  if (!valid || error || !code) return reply.code(400).type('text/html').send('<h1>知乎登录未完成</h1><p>授权已过期或校验失败，请返回游戏重试。</p>');
+  // 失败时按阶段给脱敏诊断（官方 references/deployment-credentials.md 的要求）：线上只看到一个笼统的
+  // 502 时，根本分不清是换 token 挂了还是取用户资料挂了。
+  let stage = 'token_exchange';
+  let upstream = '';
+  try {
+    // 官方协议见 references/oauth.md「换取 Access Token」：
+    //   POST https://openapi.zhihu.com/access_token
+    //   表单 app_id / app_key / grant_type=authorization_code / redirect_uri / code
+    // 字段名是 code——文档专门强调过不要把表单字段改名成 authorization_code。
+    // 这里原来打的是 /oauth/token 且用 client_id/client_secret，那是通用 OAuth2 的写法，知乎不认。
+    const form = new URLSearchParams({
+      app_id: process.env.ZHIHU_OAUTH_APP_ID!,
+      app_key: process.env.ZHIHU_OAUTH_APP_KEY!,
+      grant_type: 'authorization_code',
+      redirect_uri: process.env.ZHIHU_OAUTH_REDIRECT_URI!,
+      code
+    });
+    const tokenRes = await fetch('https://openapi.zhihu.com/access_token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: form });
+    // 知乎的业务错误是 HTTP 200 + 响应体里的 code，所以不能只看 tokenRes.ok：
+    // 必须把原始响应体留下来，否则失败时只知道「没有 access_token」，不知道知乎为什么拒绝。
+    const tokenText = await tokenRes.text();
+    let token: { access_token?: string } = {};
+    try { token = JSON.parse(tokenText) as { access_token?: string }; } catch { /* 非 JSON 时下面按缺 access_token 处理 */ }
+    if (!tokenRes.ok || !token.access_token) {
+      upstream = `HTTP ${tokenRes.status} ${tokenText.slice(0, 200) || '(空响应)'}`;
+      throw new Error('token_exchange');
+    }
+    stage = 'user_profile';
+    const profileRes = await fetch('https://openapi.zhihu.com/user', { headers: { authorization: `Bearer ${token.access_token}` } });
+    if (!profileRes.ok) { upstream = `HTTP ${profileRes.status}`; throw new Error('user_profile'); }
+    const raw = await profileRes.json() as Record<string, unknown>;
+    const profile: ZhihuProfile = { id: String(raw.id ?? raw.url_token ?? ''), name: String(raw.name ?? '知乎用户'), avatarUrl: typeof raw.avatar_url === 'string' ? raw.avatar_url : undefined, headline: typeof raw.headline === 'string' ? raw.headline : undefined };
+    const sid = crypto.randomBytes(32).toString('hex'); sessions.set(sid, { profile, expiresAt: Date.now() + 7 * 24 * 60 * 60_000 });
+    return reply.header('set-cookie', [`${SESSION_COOKIE}=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800`, 'kanshan_oauth_state=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0']).redirect('/');
+  } catch { return reply.code(502).type('text/html').send(oauthFailurePage(stage, upstream)); }
+};
+app.get('/auth/callback', oauthCallback);
+app.get('/api/auth/zhihu/callback', oauthCallback);
+
+/**
+ * 换 token / 取资料失败时的页面。
+ * 按官方 references/deployment-credentials.md 的要求给出脱敏诊断：说清失败阶段与凭证来源，
+ * 但绝不输出 App Key、Access Secret、authorization_code 或 access_token 的完整值。
+ */
+function oauthFailurePage(stage: string, upstream: string): string {
+  const appKey = process.env.ZHIHU_OAUTH_APP_KEY ?? '';
+  const esc = (s: string) => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' } as Record<string, string>)[c]);
+  const rows: [string, string][] = [
+    ['失败阶段', stage === 'user_profile' ? '取用户资料 /user' : '换取 access_token /access_token'],
+    ['app_id', process.env.ZHIHU_OAUTH_APP_ID || '(未配置)'],
+    ['app_key', appKey ? `长度 ${appKey.length}，sha256 前缀 ${crypto.createHash('sha256').update(appKey).digest('hex').slice(0, 8)}` : '(未配置)'],
+    ['redirect_uri', process.env.ZHIHU_OAUTH_REDIRECT_URI || '(未配置)'],
+    ['上游返回', upstream || '(无)']
+  ];
+  const body = rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`).join('');
+  return `<h1>知乎登录暂时失败</h1><p>没有获取到公开资料，请稍后重试。</p><table>${body}</table>`;
+}
+app.post('/api/auth/logout', async (req, reply) => { const sid = readCookie(req.headers.cookie, SESSION_COOKIE); if (sid) sessions.delete(sid); return reply.header('set-cookie', `${SESSION_COOKIE}=; Path=/; HttpOnly; Max-Age=0`).send({ ok: true }); });
+
+function readCookie(header: string | undefined, key: string): string | undefined {
+  return header?.split(';').map(v => v.trim()).find(v => v.startsWith(`${key}=`))?.slice(key.length + 1);
+}
 
 // 知乎故事列表（盐言故事，无需鉴权）
 app.get('/api/zhihu/stories', async () => {

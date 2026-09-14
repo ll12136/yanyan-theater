@@ -6,6 +6,7 @@ import { StoryScene } from './scenes/StoryScene';
 import { HarvestScene } from './scenes/HarvestScene';
 import { EndingScene } from './scenes/EndingScene';
 import { SampleScene } from './scenes/SampleScene';
+import { QuietRoomScene } from './scenes/QuietRoomScene';
 import { renderDensity, SharpScene } from './ui/SharpScene';
 
 const config: Phaser.Types.Core.GameConfig = {
@@ -18,7 +19,7 @@ const config: Phaser.Types.Core.GameConfig = {
     mode: Phaser.Scale.FIT,
     autoCenter: Phaser.Scale.CENTER_BOTH
   },
-  scene: [BootScene, MenuScene, TroubleScene, StoryScene, HarvestScene, EndingScene, SampleScene]
+  scene: [BootScene, MenuScene, TroubleScene, StoryScene, HarvestScene, EndingScene, SampleScene, QuietRoomScene]
 };
 
 export const game = new Phaser.Game(config);
